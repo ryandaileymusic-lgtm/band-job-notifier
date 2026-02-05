@@ -22,10 +22,9 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run job notifier
-        env:
-          EMAIL_HOST: ${{ secrets.EMAIL_HOST }}
-          EMAIL_PORT: ${{ secrets.EMAIL_PORT }}
-          EMAIL_USER: ${{ secrets.EMAIL_USER }}
-          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}
-        run: python band_job_notifier.py
+  env:
+    EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
+    EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+    EMAIL_TO: ${{ secrets.EMAIL_TO }}
+  run: python band_job_notifier.py
+
