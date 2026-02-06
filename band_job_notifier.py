@@ -13,24 +13,21 @@ EMAIL_PASSWORD = os.environ["EMAIL_PASSWORD"]
 EMAIL_TO = os.environ["EMAIL_TO"]
 
 # =========================
-# LOCATION CENTERS (lat, lon)
+# SEARCH CENTERS (coords + radius)
 # =========================
 SEARCH_CENTERS = {
-    "Lake Zurich": (42.1956, -88.0934),
-    "Wheaton": (41.8661, -88.1070),
-    "Joliet": (41.5250, -88.0817),
+    "Lake Zurich": {"coords": (42.1956, -88.0934), "radius": 20},
+    "Wheaton": {"coords": (41.8661, -88.1070), "radius": 20},
+    "Joliet": {"coords": (41.5250, -88.0817), "radius": 10},
 }
-
-SEARCH_RADIUS_MILES = 20
 
 # =========================
 # JOB FILTERS
 # =========================
 INCLUDE_KEYWORDS = [
     "band director",
-    "band teacher",
-    "music teacher",
     "instrumental music",
+    "music teacher",
 ]
 
 EXCLUDE_KEYWORDS = [
@@ -39,43 +36,56 @@ EXCLUDE_KEYWORDS = [
     "vocal",
 ]
 
-EXCLUDE_LOCATIONS = [
-    "chicago, il",
+# Explicit CPS exclusion only
+EXCLUDE_DISTRICTS = [
+    "chicago public schools",
+    "cps",
 ]
 
-# =========================
-# IEJB SEARCH
-# =========================
 IEJB_URL = "https://www.illinoiseducationjobbank.org/jobs"
 
-def within_radius(job_lat, job_lon):
+# =========================
+# DISTANCE CHECK (future-proof)
+# =========================
+def within_any_radius(lat, lon):
     for center in SEARCH_CENTERS.values():
-        if geodesic(center, (job_lat, job_lon)).miles <= SEARCH_RADIUS_MILES:
+        if geodesic(center["coords"], (lat, lon)).miles <= center["radius"]:
             return True
     return False
 
+# =========================
+# IEJB SCRAPER
+# =========================
 def fetch_iejb_jobs():
     response = requests.get(IEJB_URL, timeout=15)
     soup = BeautifulSoup(response.text, "html.parser")
+
     jobs = []
 
     for posting in soup.select(".job-result"):
-        title = posting.get_text(" ", strip=True).lower()
+        text = posting.get_text(" ", strip=True).lower()
 
-        if not any(k in title for k in INCLUDE_KEYWORDS):
+        # Include filters
+        if not any(k in text for k in INCLUDE_KEYWORDS):
             continue
-        if any(k in title for k in EXCLUDE_KEYWORDS):
+
+        # Exclude choir/vocal
+        if any(k in text for k in EXCLUDE_KEYWORDS):
             continue
-        if any(loc in title for loc in EXCLUDE_LOCATIONS):
+
+        # Exclude CPS only
+        if any(d in text for d in EXCLUDE_DISTRICTS):
             continue
-        if "full-time" not in title and "full time" not in title:
+
+        # Full-time only
+        if "full-time" not in text and "full time" not in text:
             continue
 
         link = posting.find("a")
         url = link["href"] if link else IEJB_URL
 
         jobs.append({
-            "title": title.title(),
+            "title": posting.get_text(" ", strip=True),
             "url": url
         })
 
@@ -86,14 +96,14 @@ def fetch_iejb_jobs():
 # =========================
 def send_email(jobs):
     if not jobs:
-        body = "No new matching band or music teacher jobs were found today."
+        body = "No new full-time band or general music teaching jobs matched your criteria today."
     else:
-        body = "New matching jobs found:\n\n"
+        body = "New matching teaching positions found:\n\n"
         for job in jobs:
             body += f"{job['title']}\n{job['url']}\n\n"
 
     msg = EmailMessage()
-    msg["Subject"] = "Chicago Suburbs Band & Music Teacher Jobs"
+    msg["Subject"] = "Chicago Suburbs Band & Music Teaching Jobs"
     msg["From"] = EMAIL_ADDRESS
     msg["To"] = EMAIL_TO
     msg.set_content(body)
@@ -109,4 +119,3 @@ jobs = fetch_iejb_jobs()
 send_email(jobs)
 
 print(f"Email sent with {len(jobs)} job(s).")
-
