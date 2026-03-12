@@ -1,12 +1,13 @@
 import os
 import re
 import time
-import smtplib
 import ssl
+import smtplib
 import requests
+from bs4 import BeautifulSoup
 from email.message import EmailMessage
 from datetime import datetime
-from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 
 EMAIL_ADDRESS = os.environ["EMAIL_ADDRESS"]
 EMAIL_PASSWORD = os.environ["EMAIL_PASSWORD"]
@@ -15,58 +16,42 @@ EMAIL_PASSWORD = os.environ["EMAIL_PASSWORD"]
 # CONFIG
 # ----------------------------
 
-SEARCH_QUERIES = [
-    # Northwest suburbs
-    '"Band Teacher" "Lake Zurich"',
-    '"Music Teacher" "Lake Zurich"',
-    '"Band Teacher" "Barrington"',
-    '"Music Teacher" "Barrington"',
-    '"Band Teacher" "Palatine"',
-    '"Music Teacher" "Palatine"',
-    '"Band Teacher" "Schaumburg"',
-    '"Music Teacher" "Schaumburg"',
-    '"Band Teacher" "Arlington Heights"',
-    '"Music Teacher" "Arlington Heights"',
-
-    # West suburbs
-    '"Band Teacher" "Wheaton"',
-    '"Music Teacher" "Wheaton"',
-    '"Band Teacher" "Glen Ellyn"',
-    '"Music Teacher" "Glen Ellyn"',
-    '"Band Teacher" "Naperville"',
-    '"Music Teacher" "Naperville"',
-    '"Band Teacher" "Aurora"',
-    '"Music Teacher" "Aurora"',
-    '"Band Teacher" "Geneva"',
-    '"Music Teacher" "Geneva"',
-
-    # Southwest suburbs
-    '"Band Teacher" "Joliet"',
-    '"Music Teacher" "Joliet"',
-    '"Band Teacher" "Plainfield"',
-    '"Music Teacher" "Plainfield"',
-    '"Band Teacher" "Romeoville"',
-    '"Music Teacher" "Romeoville"',
-    '"Band Teacher" "Bolingbrook"',
-    '"Music Teacher" "Bolingbrook"',
-
-    # High-priority districts
-    '"Band Teacher" "Indian Prairie School District 204"',
-    '"Music Teacher" "Indian Prairie School District 204"',
-    '"Band Teacher" "Valley View School District 365-U"',
-    '"Music Teacher" "Valley View School District 365-U"',
-
-    # Broad catch-all searches
-    '"Band Teacher" Illinois',
-    '"Instrumental Music Teacher" Illinois',
-    '"General Music Teacher" Illinois',
+FRONTLINE_SOURCES = [
+    {
+        "name": "Indian Prairie SD 204",
+        "url": "https://www.applitrack.com/ip204/onlineapp/default.aspx?all=1",
+        "base": "https://www.applitrack.com/ip204/onlineapp/",
+    },
+    {
+        "name": "Valley View SD 365U",
+        "url": "https://www.applitrack.com/d365/onlineapp/default.aspx?all=1",
+        "base": "https://www.applitrack.com/d365/onlineapp/",
+    },
+    {
+        "name": "DuPage County ROE",
+        "url": "https://www.applitrack.com/dupage/onlineapp/default.aspx?all=1",
+        "base": "https://www.applitrack.com/dupage/onlineapp/",
+    },
 ]
 
-ALLOWED_DOMAINS = [
-    "k12jobspot.com",
-    "applitrack.com",
-    "generalasp.com",
-    "indeed.com",
+K12JOBSPOT_QUERIES = [
+    '"Band Teacher" "Indian Prairie School District 204" site:k12jobspot.com',
+    '"Music Teacher" "Indian Prairie School District 204" site:k12jobspot.com',
+    '"Band Teacher" "Naperville" site:k12jobspot.com',
+    '"Band Teacher" "Wheaton" site:k12jobspot.com',
+    '"Band Teacher" "Lake Zurich" site:k12jobspot.com',
+    '"Band Teacher" "Barrington" site:k12jobspot.com',
+    '"Band Teacher" "Palatine" site:k12jobspot.com',
+    '"Band Teacher" "Schaumburg" site:k12jobspot.com',
+    '"Band Teacher" "Arlington Heights" site:k12jobspot.com',
+    '"Band Teacher" "Aurora" site:k12jobspot.com',
+    '"Band Teacher" "Geneva" site:k12jobspot.com',
+    '"Band Teacher" "Joliet" site:k12jobspot.com',
+    '"Band Teacher" "Plainfield" site:k12jobspot.com',
+    '"Band Teacher" "Romeoville" site:k12jobspot.com',
+    '"Band Teacher" "Bolingbrook" site:k12jobspot.com',
+    '"General Music Teacher" Illinois site:k12jobspot.com',
+    '"Instrumental Music Teacher" Illinois site:k12jobspot.com',
 ]
 
 REQUIRED_KEYWORDS = [
@@ -74,6 +59,13 @@ REQUIRED_KEYWORDS = [
     "instrumental",
     "music teacher",
     "general music",
+]
+
+FULL_TIME_TERMS = [
+    "full-time",
+    "full time",
+    "fte",
+    "1.0",
 ]
 
 EXCLUDED_KEYWORDS = [
@@ -85,13 +77,6 @@ EXCLUDED_KEYWORDS = [
     "substitute",
     "long term substitute",
     "summer school",
-]
-
-FULL_TIME_TERMS = [
-    "full-time",
-    "full time",
-    "fte",
-    "1.0",
 ]
 
 SEEN_FILE = "seen_jobs.txt"
@@ -108,6 +93,9 @@ HEADERS = {
 # HELPERS
 # ----------------------------
 
+def normalize_whitespace(text):
+    return re.sub(r"\s+", " ", text).strip()
+
 def load_seen():
     if not os.path.exists(SEEN_FILE):
         return set()
@@ -119,13 +107,7 @@ def save_seen(seen_links):
         for link in sorted(seen_links):
             f.write(link + "\n")
 
-def normalize_whitespace(text):
-    return re.sub(r"\s+", " ", text).strip()
-
-def domain_allowed(url):
-    return any(domain in url for domain in ALLOWED_DOMAINS)
-
-def text_matches(text):
+def looks_like_match(text):
     t = text.lower()
 
     if not any(k in t for k in REQUIRED_KEYWORDS):
@@ -139,14 +121,28 @@ def text_matches(text):
 
     return True
 
-def clean_link(url):
-    if url.startswith("//"):
-        return "https:" + url
-    return url
-
-# ----------------------------
-# EMAIL
-# ----------------------------
+def extract_location(text):
+    suburb_patterns = [
+        r"Lake Zurich,\s*IL(?:\s*\d{5})?",
+        r"Barrington,\s*IL(?:\s*\d{5})?",
+        r"Palatine,\s*IL(?:\s*\d{5})?",
+        r"Schaumburg,\s*IL(?:\s*\d{5})?",
+        r"Arlington Heights,\s*IL(?:\s*\d{5})?",
+        r"Wheaton,\s*IL(?:\s*\d{5})?",
+        r"Glen Ellyn,\s*IL(?:\s*\d{5})?",
+        r"Naperville,\s*IL(?:\s*\d{5})?",
+        r"Aurora,\s*IL(?:\s*\d{5})?",
+        r"Geneva,\s*IL(?:\s*\d{5})?",
+        r"Joliet,\s*IL(?:\s*\d{5})?",
+        r"Plainfield,\s*IL(?:\s*\d{5})?",
+        r"Romeoville,\s*IL(?:\s*\d{5})?",
+        r"Bolingbrook,\s*IL(?:\s*\d{5})?",
+    ]
+    for pattern in suburb_patterns:
+        m = re.search(pattern, text, re.I)
+        if m:
+            return m.group(0)
+    return "Location not listed"
 
 def send_email(jobs):
     msg = EmailMessage()
@@ -157,15 +153,15 @@ def send_email(jobs):
     if not jobs:
         body = "No new qualifying jobs were found today."
     else:
-        parts = []
+        blocks = []
         for job in jobs:
-            parts.append(
+            blocks.append(
                 f"{job['title']}\n"
                 f"{job['district']}\n"
                 f"{job['location']}\n"
                 f"{job['link']}"
             )
-        body = "\n\n".join(parts)
+        body = "\n\n".join(blocks)
 
     msg.set_content(body)
 
@@ -175,14 +171,64 @@ def send_email(jobs):
         server.send_message(msg)
 
 # ----------------------------
-# SEARCH ENGINE SCRAPE
+# FRONTLINE / APPLITRACK
+# ----------------------------
+
+def parse_frontline_source(source):
+    response = requests.get(source["url"], headers=HEADERS, timeout=20)
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    text = normalize_whitespace(soup.get_text(" ", strip=True))
+    jobs = []
+
+    # Frontline pages often expose posting titles in anchor text and summary text
+    for a in soup.find_all("a", href=True):
+        anchor_text = normalize_whitespace(a.get_text(" ", strip=True))
+        href = a["href"]
+
+        if not anchor_text:
+            continue
+
+        combined_text = (anchor_text + " " + text).lower()
+
+        if not any(k in combined_text for k in REQUIRED_KEYWORDS):
+            continue
+
+        if any(k in combined_text for k in EXCLUDED_KEYWORDS):
+            continue
+
+        if not any(k in combined_text for k in FULL_TIME_TERMS):
+            # fallback: many frontline postings don't say full-time in anchor text;
+            # keep if title is strong and page contains "position type" in relevant teaching category
+            if "position type" not in text.lower():
+                continue
+
+        if "jobid" not in href.lower() and "view.asp" not in href.lower():
+            continue
+
+        job_link = urljoin(source["base"], href)
+        jobs.append({
+            "title": anchor_text,
+            "district": source["name"],
+            "location": extract_location(text),
+            "link": job_link
+        })
+
+    # de-duplicate by link
+    deduped = {}
+    for job in jobs:
+        deduped[job["link"]] = job
+
+    return list(deduped.values())
+
+# ----------------------------
+# DUCKDUCKGO -> K12JOBSPOT DETAIL PAGES
 # ----------------------------
 
 def duckduckgo_search(query):
     url = "https://html.duckduckgo.com/html/"
-    params = {"q": query}
-
-    response = requests.get(url, params=params, headers=HEADERS, timeout=20)
+    response = requests.get(url, params={"q": query}, headers=HEADERS, timeout=20)
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "html.parser")
@@ -191,122 +237,32 @@ def duckduckgo_search(query):
     for a in soup.select("a.result__a"):
         href = a.get("href", "")
         title = normalize_whitespace(a.get_text(" ", strip=True))
-
-        if href and title:
-            results.append({
-                "title": title,
-                "link": clean_link(href)
-            })
+        if href and title and "k12jobspot.com" in href:
+            results.append({"title": title, "link": href})
 
     return results
 
-# ----------------------------
-# DETAIL PAGE PARSERS
-# ----------------------------
-
-def parse_k12jobspot(url):
+def parse_k12jobspot_detail(url):
     response = requests.get(url, headers=HEADERS, timeout=20)
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "html.parser")
-    text = normalize_whitespace(soup.get_text(" ", strip=True))
+    page_text = normalize_whitespace(soup.get_text(" ", strip=True))
 
-    if not text_matches(text):
-        return None
-
-    # Title
-    title = "Untitled Job"
-    title_el = soup.select_one("h1")
-    if title_el:
-        title = normalize_whitespace(title_el.get_text(" ", strip=True))
-
-    # District
-    district = "Unknown District"
-
-    # Look for common district patterns in page text
-    district_patterns = [
-        r"Indian Prairie School District 204",
-        r"Valley View School District 365-U",
-        r"Naperville CUSD 203",
-        r"Community Unit School District 200",
-        r"Lake Zurich CUSD 95",
-        r"Barrington CUSD 220",
-        r"Palatine CCSD",
-        r"Schaumburg CCSD",
-        r"Arlington Heights School District",
-        r"Geneva CUSD 304",
-        r"Plainfield School District 202",
-        r"Joliet Public Schools District 86",
-        r"Joliet Township High School District 204",
-        r"Bolingbrook",
-        r"Romeoville",
-    ]
-
-    for pattern in district_patterns:
-        match = re.search(pattern, text, re.I)
-        if match:
-            district = match.group(0)
-            break
-
-    # Fall back to h2 tags if district still unknown
-    if district == "Unknown District":
-        for h2 in soup.find_all("h2"):
-            htxt = normalize_whitespace(h2.get_text(" ", strip=True))
-            if htxt and htxt.lower() != "description":
-                district = htxt
-                break
-
-    # Location
-    location = "Location not listed"
-
-    location_patterns = [
-        r"Lake Zurich,\s*IL(?:\s*\d{5})?",
-        r"Barrington,\s*IL(?:\s*\d{5})?",
-        r"Palatine,\s*IL(?:\s*\d{5})?",
-        r"Schaumburg,\s*IL(?:\s*\d{5})?",
-        r"Arlington Heights,\s*IL(?:\s*\d{5})?",
-        r"Wheaton,\s*IL(?:\s*\d{5})?",
-        r"Glen Ellyn,\s*IL(?:\s*\d{5})?",
-        r"Naperville,\s*IL(?:\s*\d{5})?",
-        r"Aurora,\s*IL(?:\s*\d{5})?",
-        r"Geneva,\s*IL(?:\s*\d{5})?",
-        r"Joliet,\s*IL(?:\s*\d{5})?",
-        r"Plainfield,\s*IL(?:\s*\d{5})?",
-        r"Romeoville,\s*IL(?:\s*\d{5})?",
-        r"Bolingbrook,\s*IL(?:\s*\d{5})?",
-    ]
-
-    for pattern in location_patterns:
-        match = re.search(pattern, text, re.I)
-        if match:
-            location = match.group(0)
-            break
-
-    return {
-        "title": title,
-        "district": district,
-        "location": location,
-        "link": url
-    }
-
-def parse_generic(url):
-    response = requests.get(url, headers=HEADERS, timeout=20)
-    response.raise_for_status()
-
-    soup = BeautifulSoup(response.text, "html.parser")
-    text = normalize_whitespace(soup.get_text(" ", strip=True))
-
-    if not text_matches(text):
+    if not looks_like_match(page_text):
         return None
 
     title = "Untitled Job"
-    if soup.title:
+    h1 = soup.select_one("h1")
+    if h1:
+        title = normalize_whitespace(h1.get_text(" ", strip=True))
+    elif soup.title:
         title = normalize_whitespace(soup.title.get_text(" ", strip=True))
 
     district = "Unknown District"
     district_patterns = [
         r"Indian Prairie School District 204",
-        r"Valley View School District 365-U",
+        r"Valley View (?:Community Unit )?School District 365U?",
         r"Naperville CUSD 203",
         r"Community Unit School District 200",
         r"Lake Zurich CUSD 95",
@@ -317,33 +273,12 @@ def parse_generic(url):
         r"Joliet Township High School District 204",
     ]
     for pattern in district_patterns:
-        match = re.search(pattern, text, re.I)
-        if match:
-            district = match.group(0)
+        m = re.search(pattern, page_text, re.I)
+        if m:
+            district = m.group(0)
             break
 
-    location = "Location not listed"
-    location_patterns = [
-        r"Lake Zurich,\s*IL(?:\s*\d{5})?",
-        r"Barrington,\s*IL(?:\s*\d{5})?",
-        r"Palatine,\s*IL(?:\s*\d{5})?",
-        r"Schaumburg,\s*IL(?:\s*\d{5})?",
-        r"Arlington Heights,\s*IL(?:\s*\d{5})?",
-        r"Wheaton,\s*IL(?:\s*\d{5})?",
-        r"Glen Ellyn,\s*IL(?:\s*\d{5})?",
-        r"Naperville,\s*IL(?:\s*\d{5})?",
-        r"Aurora,\s*IL(?:\s*\d{5})?",
-        r"Geneva,\s*IL(?:\s*\d{5})?",
-        r"Joliet,\s*IL(?:\s*\d{5})?",
-        r"Plainfield,\s*IL(?:\s*\d{5})?",
-        r"Romeoville,\s*IL(?:\s*\d{5})?",
-        r"Bolingbrook,\s*IL(?:\s*\d{5})?",
-    ]
-    for pattern in location_patterns:
-        match = re.search(pattern, text, re.I)
-        if match:
-            location = match.group(0)
-            break
+    location = extract_location(page_text)
 
     return {
         "title": title,
@@ -352,16 +287,8 @@ def parse_generic(url):
         "link": url
     }
 
-def parse_job_page(url):
-    try:
-        if "k12jobspot.com/Job/" in url:
-            return parse_k12jobspot(url)
-        return parse_generic(url)
-    except Exception:
-        return None
-
 # ----------------------------
-# MAIN SEARCH LOGIC
+# MAIN
 # ----------------------------
 
 def run_search():
@@ -369,7 +296,23 @@ def run_search():
     found_jobs = []
     updated_seen = set(seen)
 
-    for query in SEARCH_QUERIES:
+    # 1) Direct Frontline checks
+    for source in FRONTLINE_SOURCES:
+        try:
+            jobs = parse_frontline_source(source)
+            time.sleep(1)
+
+            for job in jobs:
+                if job["link"] in updated_seen:
+                    continue
+                updated_seen.add(job["link"])
+                found_jobs.append(job)
+
+        except Exception as e:
+            print(f"Frontline error for {source['name']}: {e}")
+
+    # 2) K12JobSpot detail pages via DuckDuckGo
+    for query in K12JOBSPOT_QUERIES:
         try:
             results = duckduckgo_search(query)
             time.sleep(2)
@@ -377,13 +320,10 @@ def run_search():
             for result in results:
                 url = result["link"]
 
-                if not domain_allowed(url):
-                    continue
-
                 if url in updated_seen:
                     continue
 
-                job = parse_job_page(url)
+                job = parse_k12jobspot_detail(url)
                 time.sleep(1)
 
                 if not job:
@@ -393,20 +333,15 @@ def run_search():
                 found_jobs.append(job)
 
         except Exception as e:
-            print(f"Error while processing query '{query}': {e}")
+            print(f"K12JobSpot query error for {query}: {e}")
 
     save_seen(updated_seen)
 
-    # Remove duplicates by link
     deduped = {}
     for job in found_jobs:
         deduped[job["link"]] = job
 
     return list(deduped.values())
-
-# ----------------------------
-# RUN
-# ----------------------------
 
 if __name__ == "__main__":
     jobs = run_search()
