@@ -7,7 +7,6 @@ import requests
 from bs4 import BeautifulSoup
 from email.message import EmailMessage
 from datetime import datetime
-from urllib.parse import urljoin
 
 EMAIL_ADDRESS = os.environ["EMAIL_ADDRESS"]
 EMAIL_PASSWORD = os.environ["EMAIL_PASSWORD"]
@@ -16,36 +15,66 @@ EMAIL_PASSWORD = os.environ["EMAIL_PASSWORD"]
 # CONFIG
 # ----------------------------
 
-FRONTLINE_SOURCES = [
+FRONTLINE_DISTRICTS = [
     {
-        "name": "Indian Prairie SD 204",
-        "url": "https://www.applitrack.com/ip204/onlineapp/default.aspx?all=1",
-        "base": "https://www.applitrack.com/ip204/onlineapp/",
+        "name": "Indian Prairie School District 204",
+        "search_terms": [
+            '"Band Teacher" "Indian Prairie School District 204" site:applitrack.com',
+            '"Music Teacher" "Indian Prairie School District 204" site:applitrack.com',
+            '"General Music Teacher" "Indian Prairie School District 204" site:applitrack.com',
+        ],
     },
     {
-        "name": "Valley View SD 365U",
-        "url": "https://www.applitrack.com/d365/onlineapp/default.aspx?all=1",
-        "base": "https://www.applitrack.com/d365/onlineapp/",
+        "name": "Valley View School District 365-U",
+        "search_terms": [
+            '"Band Teacher" "Valley View School District 365-U" site:applitrack.com',
+            '"Music Teacher" "Valley View School District 365-U" site:applitrack.com',
+        ],
     },
     {
-        "name": "DuPage County ROE",
-        "url": "https://www.applitrack.com/dupage/onlineapp/default.aspx?all=1",
-        "base": "https://www.applitrack.com/dupage/onlineapp/",
+        "name": "DuPage County area",
+        "search_terms": [
+            '"Band Teacher" "Naperville" site:applitrack.com',
+            '"Band Teacher" "Wheaton" site:applitrack.com',
+            '"Band Teacher" "Glen Ellyn" site:applitrack.com',
+            '"Band Teacher" "Aurora" site:applitrack.com',
+            '"Band Teacher" "Geneva" site:applitrack.com',
+        ],
+    },
+    {
+        "name": "Northwest suburbs",
+        "search_terms": [
+            '"Band Teacher" "Lake Zurich" site:applitrack.com',
+            '"Band Teacher" "Barrington" site:applitrack.com',
+            '"Band Teacher" "Palatine" site:applitrack.com',
+            '"Band Teacher" "Schaumburg" site:applitrack.com',
+            '"Band Teacher" "Arlington Heights" site:applitrack.com',
+        ],
+    },
+    {
+        "name": "Southwest suburbs",
+        "search_terms": [
+            '"Band Teacher" "Joliet" site:applitrack.com',
+            '"Band Teacher" "Plainfield" site:applitrack.com',
+            '"Band Teacher" "Romeoville" site:applitrack.com',
+            '"Band Teacher" "Bolingbrook" site:applitrack.com',
+        ],
     },
 ]
 
-K12JOBSPOT_QUERIES = [
+K12_QUERIES = [
     '"Band Teacher" "Indian Prairie School District 204" site:k12jobspot.com',
     '"Music Teacher" "Indian Prairie School District 204" site:k12jobspot.com',
     '"Band Teacher" "Naperville" site:k12jobspot.com',
     '"Band Teacher" "Wheaton" site:k12jobspot.com',
+    '"Band Teacher" "Glen Ellyn" site:k12jobspot.com',
+    '"Band Teacher" "Aurora" site:k12jobspot.com',
+    '"Band Teacher" "Geneva" site:k12jobspot.com',
     '"Band Teacher" "Lake Zurich" site:k12jobspot.com',
     '"Band Teacher" "Barrington" site:k12jobspot.com',
     '"Band Teacher" "Palatine" site:k12jobspot.com',
     '"Band Teacher" "Schaumburg" site:k12jobspot.com',
     '"Band Teacher" "Arlington Heights" site:k12jobspot.com',
-    '"Band Teacher" "Aurora" site:k12jobspot.com',
-    '"Band Teacher" "Geneva" site:k12jobspot.com',
     '"Band Teacher" "Joliet" site:k12jobspot.com',
     '"Band Teacher" "Plainfield" site:k12jobspot.com',
     '"Band Teacher" "Romeoville" site:k12jobspot.com',
@@ -54,21 +83,14 @@ K12JOBSPOT_QUERIES = [
     '"Instrumental Music Teacher" Illinois site:k12jobspot.com',
 ]
 
-REQUIRED_KEYWORDS = [
+REQUIRED_TERMS = [
     "band",
     "instrumental",
     "music teacher",
     "general music",
 ]
 
-FULL_TIME_TERMS = [
-    "full-time",
-    "full time",
-    "fte",
-    "1.0",
-]
-
-EXCLUDED_KEYWORDS = [
+EXCLUDED_TERMS = [
     "choir",
     "choral",
     "vocal",
@@ -77,6 +99,13 @@ EXCLUDED_KEYWORDS = [
     "substitute",
     "long term substitute",
     "summer school",
+]
+
+FULL_TIME_TERMS = [
+    "full-time",
+    "full time",
+    "fte",
+    "1.0",
 ]
 
 SEEN_FILE = "seen_jobs.txt"
@@ -107,22 +136,20 @@ def save_seen(seen_links):
         for link in sorted(seen_links):
             f.write(link + "\n")
 
-def looks_like_match(text):
+def contains_required(text):
     t = text.lower()
+    return any(term in t for term in REQUIRED_TERMS)
 
-    if not any(k in t for k in REQUIRED_KEYWORDS):
-        return False
+def contains_excluded(text):
+    t = text.lower()
+    return any(term in t for term in EXCLUDED_TERMS)
 
-    if any(k in t for k in EXCLUDED_KEYWORDS):
-        return False
-
-    if not any(k in t for k in FULL_TIME_TERMS):
-        return False
-
-    return True
+def contains_full_time(text):
+    t = text.lower()
+    return any(term in t for term in FULL_TIME_TERMS)
 
 def extract_location(text):
-    suburb_patterns = [
+    patterns = [
         r"Lake Zurich,\s*IL(?:\s*\d{5})?",
         r"Barrington,\s*IL(?:\s*\d{5})?",
         r"Palatine,\s*IL(?:\s*\d{5})?",
@@ -138,11 +165,30 @@ def extract_location(text):
         r"Romeoville,\s*IL(?:\s*\d{5})?",
         r"Bolingbrook,\s*IL(?:\s*\d{5})?",
     ]
-    for pattern in suburb_patterns:
+    for pattern in patterns:
         m = re.search(pattern, text, re.I)
         if m:
             return m.group(0)
     return "Location not listed"
+
+def extract_district(text):
+    patterns = [
+        r"Indian Prairie School District 204",
+        r"Valley View (?:Community Unit )?School District 365-?U",
+        r"Naperville CUSD 203",
+        r"Community Unit School District 200",
+        r"Lake Zurich CUSD 95",
+        r"Barrington CUSD 220",
+        r"Geneva CUSD 304",
+        r"Plainfield School District 202",
+        r"Joliet Public Schools District 86",
+        r"Joliet Township High School District 204",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text, re.I)
+        if m:
+            return m.group(0)
+    return "Unknown District"
 
 def send_email(jobs):
     msg = EmailMessage()
@@ -151,7 +197,7 @@ def send_email(jobs):
     msg["Subject"] = f"Band / Music Job Alert — {datetime.now().strftime('%b %d')}"
 
     if not jobs:
-        body = "No new qualifying jobs were found today."
+        body = "No new qualifying band or instrumental music positions were found today."
     else:
         blocks = []
         for job in jobs:
@@ -171,64 +217,16 @@ def send_email(jobs):
         server.send_message(msg)
 
 # ----------------------------
-# FRONTLINE / APPLITRACK
-# ----------------------------
-
-def parse_frontline_source(source):
-    response = requests.get(source["url"], headers=HEADERS, timeout=20)
-    response.raise_for_status()
-
-    soup = BeautifulSoup(response.text, "html.parser")
-    text = normalize_whitespace(soup.get_text(" ", strip=True))
-    jobs = []
-
-    # Frontline pages often expose posting titles in anchor text and summary text
-    for a in soup.find_all("a", href=True):
-        anchor_text = normalize_whitespace(a.get_text(" ", strip=True))
-        href = a["href"]
-
-        if not anchor_text:
-            continue
-
-        combined_text = (anchor_text + " " + text).lower()
-
-        if not any(k in combined_text for k in REQUIRED_KEYWORDS):
-            continue
-
-        if any(k in combined_text for k in EXCLUDED_KEYWORDS):
-            continue
-
-        if not any(k in combined_text for k in FULL_TIME_TERMS):
-            # fallback: many frontline postings don't say full-time in anchor text;
-            # keep if title is strong and page contains "position type" in relevant teaching category
-            if "position type" not in text.lower():
-                continue
-
-        if "jobid" not in href.lower() and "view.asp" not in href.lower():
-            continue
-
-        job_link = urljoin(source["base"], href)
-        jobs.append({
-            "title": anchor_text,
-            "district": source["name"],
-            "location": extract_location(text),
-            "link": job_link
-        })
-
-    # de-duplicate by link
-    deduped = {}
-    for job in jobs:
-        deduped[job["link"]] = job
-
-    return list(deduped.values())
-
-# ----------------------------
-# DUCKDUCKGO -> K12JOBSPOT DETAIL PAGES
+# SEARCH
 # ----------------------------
 
 def duckduckgo_search(query):
-    url = "https://html.duckduckgo.com/html/"
-    response = requests.get(url, params={"q": query}, headers=HEADERS, timeout=20)
+    response = requests.get(
+        "https://html.duckduckgo.com/html/",
+        params={"q": query},
+        headers=HEADERS,
+        timeout=20,
+    )
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "html.parser")
@@ -237,19 +235,72 @@ def duckduckgo_search(query):
     for a in soup.select("a.result__a"):
         href = a.get("href", "")
         title = normalize_whitespace(a.get_text(" ", strip=True))
-        if href and title and "k12jobspot.com" in href:
-            results.append({"title": title, "link": href})
+        snippet = ""
+
+        result_container = a.find_parent(class_="result")
+        if result_container:
+            snippet_el = result_container.select_one(".result__snippet")
+            if snippet_el:
+                snippet = normalize_whitespace(snippet_el.get_text(" ", strip=True))
+
+        if href and title:
+            results.append({
+                "title": title,
+                "link": href,
+                "snippet": snippet,
+            })
 
     return results
 
-def parse_k12jobspot_detail(url):
+# ----------------------------
+# FRONTLINE / APPLITRACK
+# ----------------------------
+
+def parse_frontline_result(result):
+    combined = f"{result['title']} {result['snippet']}"
+    t = combined.lower()
+
+    if not contains_required(t):
+        return None
+    if contains_excluded(t):
+        return None
+
+    # Frontline snippets often omit explicit full-time wording.
+    # Accept strong teaching-title matches on AppliTrack even if full-time is not in the snippet.
+    strong_title = (
+        "band teacher" in t
+        or "music teacher" in t
+        or "music - band" in t
+        or "middle school teaching/music - band" in t
+    )
+
+    if not contains_full_time(t) and not strong_title:
+        return None
+
+    return {
+        "title": result["title"],
+        "district": extract_district(combined),
+        "location": extract_location(combined),
+        "link": result["link"],
+    }
+
+# ----------------------------
+# K12JOBSPOT
+# ----------------------------
+
+def parse_k12_detail(url):
     response = requests.get(url, headers=HEADERS, timeout=20)
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "html.parser")
-    page_text = normalize_whitespace(soup.get_text(" ", strip=True))
+    text = normalize_whitespace(soup.get_text(" ", strip=True))
+    t = text.lower()
 
-    if not looks_like_match(page_text):
+    if not contains_required(t):
+        return None
+    if contains_excluded(t):
+        return None
+    if not contains_full_time(t):
         return None
 
     title = "Untitled Job"
@@ -259,32 +310,14 @@ def parse_k12jobspot_detail(url):
     elif soup.title:
         title = normalize_whitespace(soup.title.get_text(" ", strip=True))
 
-    district = "Unknown District"
-    district_patterns = [
-        r"Indian Prairie School District 204",
-        r"Valley View (?:Community Unit )?School District 365U?",
-        r"Naperville CUSD 203",
-        r"Community Unit School District 200",
-        r"Lake Zurich CUSD 95",
-        r"Barrington CUSD 220",
-        r"Geneva CUSD 304",
-        r"Plainfield School District 202",
-        r"Joliet Public Schools District 86",
-        r"Joliet Township High School District 204",
-    ]
-    for pattern in district_patterns:
-        m = re.search(pattern, page_text, re.I)
-        if m:
-            district = m.group(0)
-            break
-
-    location = extract_location(page_text)
+    district = extract_district(text)
+    location = extract_location(text)
 
     return {
         "title": title,
         "district": district,
         "location": location,
-        "link": url
+        "link": url,
     }
 
 # ----------------------------
@@ -293,52 +326,62 @@ def parse_k12jobspot_detail(url):
 
 def run_search():
     seen = load_seen()
-    found_jobs = []
     updated_seen = set(seen)
+    found = []
 
-    # 1) Direct Frontline checks
-    for source in FRONTLINE_SOURCES:
-        try:
-            jobs = parse_frontline_source(source)
-            time.sleep(1)
+    # Frontline / AppliTrack result parsing
+    for district in FRONTLINE_DISTRICTS:
+        for query in district["search_terms"]:
+            try:
+                results = duckduckgo_search(query)
+                time.sleep(2)
 
-            for job in jobs:
-                if job["link"] in updated_seen:
-                    continue
-                updated_seen.add(job["link"])
-                found_jobs.append(job)
+                for result in results:
+                    url = result["link"]
+                    if "applitrack.com" not in url:
+                        continue
+                    if url in updated_seen:
+                        continue
 
-        except Exception as e:
-            print(f"Frontline error for {source['name']}: {e}")
+                    job = parse_frontline_result(result)
+                    if not job:
+                        continue
 
-    # 2) K12JobSpot detail pages via DuckDuckGo
-    for query in K12JOBSPOT_QUERIES:
+                    updated_seen.add(url)
+                    found.append(job)
+
+            except Exception as e:
+                print(f"Frontline search error for {query}: {e}")
+
+    # K12JobSpot detail pages
+    for query in K12_QUERIES:
         try:
             results = duckduckgo_search(query)
             time.sleep(2)
 
             for result in results:
                 url = result["link"]
-
+                if "k12jobspot.com" not in url:
+                    continue
                 if url in updated_seen:
                     continue
 
-                job = parse_k12jobspot_detail(url)
+                job = parse_k12_detail(url)
                 time.sleep(1)
 
                 if not job:
                     continue
 
                 updated_seen.add(url)
-                found_jobs.append(job)
+                found.append(job)
 
         except Exception as e:
-            print(f"K12JobSpot query error for {query}: {e}")
+            print(f"K12 search error for {query}: {e}")
 
     save_seen(updated_seen)
 
     deduped = {}
-    for job in found_jobs:
+    for job in found:
         deduped[job["link"]] = job
 
     return list(deduped.values())
